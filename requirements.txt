@@ -1,0 +1,5 @@
+praw
+gdown
+zstandard
+python-dotenv
+huggingface_hub
