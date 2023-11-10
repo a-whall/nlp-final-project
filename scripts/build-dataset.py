@@ -8,9 +8,12 @@ Usage:
     python3 scripts/build-dataset.py
 """
 import os
+import re
 import csv
 import zst
+import html
 import gdown
+import json
 from zipfile import ZipFile
 
 
@@ -20,6 +23,16 @@ RAW_DATA_DIR = "AItAS"
 
 URL = "https://drive.google.com/uc?id=1uME2-98ErcED630U7kT8ceuotLDIuQj1"
 
+
+def clean_text(text):
+    text = re.sub(r'http[s]?://\S+', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bEdit\b.*', '', text, flags=re.IGNORECASE)
+    text = html.unescape(text)
+    text = re.sub(r'&amp;amp;|&amp;', 'and', text, flags=re.IGNORECASE)
+    return text
+
+def valid_label(text):
+    return text == "Not the A-hole" or text == "Asshole" or text == "No A-holes here" or text == "Everyone Sucks" or text == "Not enough info"
 
 if __name__ == "__main__":
 
@@ -52,11 +65,16 @@ if __name__ == "__main__":
 
     # Build the dataset
 
-    out_file = open(DATAPATH + "AItAS_dataset.csv", "w")
+    out_file = open(DATAPATH + "AItAS_dataset.csv", "w", encoding="utf8")
 
     writer = csv.writer(out_file)
 
+    obj_keys = ["title", "selftext", "link_flair_text"]
+
     writer.writerow(["title", "body", "label"])
+
+    total_submissions = 0
+    total_removed = 0
     
     for file_name in sorted(os.listdir(path_to_dir)):
         
@@ -67,8 +85,43 @@ if __name__ == "__main__":
 
         path_to_file = os.path.join(path_to_dir, file_name)
 
+        success = 0
+        bad_lines = 0
+        csv_bad_char = 0
+        invalid_label = 0
+        deleted = 0
+
         for line, bytes_processed in zst.read_lines(path_to_file):
 
-            pass # TODO: add the code for converting each line of json object to a line of csv
+            try:
+                obj = json.loads(line)
+
+                if obj["selftext"] == "[deleted]" or obj["selftext"] == "[removed]":
+                    deleted += 1
+                    continue
+
+                if not valid_label(obj["link_flair_text"]):
+                    invalid_label += 1
+                    continue
+
+                writer.writerow(clean_text(obj[key]) for key in obj_keys)
+            
+            except KeyError as k:
+                print(f"Invalid keys: {k}")
+                exit()
+            except json.JSONDecodeError as j:
+                bad_lines += 1
+            except UnicodeEncodeError as u:
+                csv_bad_char += 1
+
+            success += 1
+        
+        total_submissions += success
+        removed = bad_lines + csv_bad_char + deleted + invalid_label
+        total_removed += removed
+
+        print(f"Extracted {success}/{success+removed} : {bad_lines} json decode errors : {csv_bad_char} invalid csv characters : {deleted} deleted posts : {invalid_label} invalid labels")
+
+    print(f"Finished. Final dataset has {total_submissions} total submissions. Removed {total_removed}")
 
     out_file.close()
