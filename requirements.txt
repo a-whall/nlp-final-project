@@ -1,5 +1,6 @@
 praw
 gdown
+datasets
 zstandard
 python-dotenv
 huggingface_hub
