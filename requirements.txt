@@ -1,6 +1,9 @@
 praw
+tqdm
 gdown
 datasets
 zstandard
+transformers
+torchmetrics
 python-dotenv
 huggingface_hub
