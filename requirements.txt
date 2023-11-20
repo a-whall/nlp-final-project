@@ -1,6 +1,7 @@
 praw
 tqdm
 gdown
+numpy
 datasets
 zstandard
 matplotlib
