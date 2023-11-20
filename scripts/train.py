@@ -9,6 +9,7 @@ from torchmetrics.classification import MulticlassAccuracy
 from progress import ShowProgress
 import matplotlib.pyplot as plt
 from inspect import getmembers, isclass
+import numpy as np
 
 
 
@@ -51,6 +52,15 @@ def main(args):
     label_mapping = { "Not the A-hole": 0, "Asshole": 1, "No A-holes here": 2, "Everyone Sucks": 3, "Not enough info": 4 }
     full_dataset = load_dataset('awhall/aita_21-11_22-10')["train"]
     ds = full_dataset.map(lambda x: { **x, 'num_label': label_mapping[x['label']] }).class_encode_column('num_label')
+    
+    # Discard samples of the most frequent NTA class
+    np.random.seed(args.seed)
+    indices_of_NTA = [i for i, example in enumerate(ds) if example['num_label'] == 0]
+    indices_to_discard = np.random.choice(indices_of_NTA, 69000, replace=False)
+    all_indices = np.arange(len(ds))
+    indices_to_keep = np.setdiff1d(all_indices, indices_to_discard)
+    ds = ds.select(indices_to_keep)
+
     split = ds.train_test_split(test_size=0.2, stratify_by_column="num_label", seed=args.seed)
 
     loader_args = {
@@ -179,7 +189,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--model',
         type=str,
-        default="DistilBert_A",
+        default="DistilBert_B",
         choices=[name for name, obj in getmembers(models) if isclass(obj) and issubclass(obj, torch.nn.Module)],
         help="The name of the model class to train. The name must match one of the models defined in scripts/models.py",
         metavar=""
@@ -212,7 +222,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--learning_rate',
         type=float,
-        default=1e-6,
+        default=5e-5,
         help="AKA step-length. This hyperparameter controls how much the optimizer adjusts the model weights in each step during gradient descent.",
         metavar=""
     )
@@ -220,7 +230,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--batch_size',
         type=int,
-        default=2048,
+        default=1024,
         help="How many inputs to include in each batch of optimization. This many inputs will be processed and contribute to gradient of model parameters before allowing the optimizer to update model weights. Larger batch size often result in smoother gradients which can lead to more stable and reliable training convergence, smaller batch size tend to produce noisy gradients which may help the model to generalize better. When adjusting batch size, consider adjusting the learning rate as well.",
         metavar=""
     )
