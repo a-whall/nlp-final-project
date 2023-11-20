@@ -21,7 +21,7 @@ DATAPATH = "./data/"
 
 RAW_DATA_DIR = "AItAS"
 
-URL = "https://drive.google.com/uc?id=1uME2-98ErcED630U7kT8ceuotLDIuQj1"
+URL = "https://drive.google.com/uc?id=1ui31UsnJbTLacMwWgfv81H7k6lG1atcu"
 
 
 def clean_text(text):
@@ -36,8 +36,7 @@ def valid_label(text):
 
 if __name__ == "__main__":
 
-    if not os.path.exists(DATAPATH):
-        os.mkdir(DATAPATH)
+    os.makedirs(DATAPATH, exist_ok=True)
 
     path_to_dir = DATAPATH + RAW_DATA_DIR
     path_to_zip = DATAPATH + RAW_DATA_DIR + ".zip"
@@ -89,16 +88,11 @@ if __name__ == "__main__":
         bad_lines = 0
         csv_bad_char = 0
         invalid_label = 0
-        deleted = 0
 
         for line, bytes_processed in zst.read_lines(path_to_file):
 
             try:
                 obj = json.loads(line)
-
-                if obj["selftext"] == "[deleted]" or obj["selftext"] == "[removed]":
-                    deleted += 1
-                    continue
 
                 if not valid_label(obj["link_flair_text"]):
                     invalid_label += 1
@@ -117,10 +111,10 @@ if __name__ == "__main__":
             success += 1
         
         total_submissions += success
-        removed = bad_lines + csv_bad_char + deleted + invalid_label
+        removed = bad_lines + csv_bad_char + invalid_label
         total_removed += removed
 
-        print(f"Extracted {success}/{success+removed} : {bad_lines} json decode errors : {csv_bad_char} invalid csv characters : {deleted} deleted posts : {invalid_label} invalid labels")
+        print(f"Extracted {success}/{success+removed} : {bad_lines} json decode errors : {csv_bad_char} invalid csv characters : {invalid_label} invalid labels")
 
     print(f"Finished. Final dataset has {total_submissions} total submissions. Removed {total_removed}")
 

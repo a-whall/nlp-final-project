@@ -34,13 +34,14 @@ if __name__ == "__main__":
     aita_posts_found = 0
     aita_deleted = 0
     aita_no_flair = 0
+    aita_context_missing = 0
 
     batch_str = ""
 
     if not os.path.exists(DATAPATH):
         os.mkdir(DATAPATH)
 
-    out_file = open(DATAPATH+file_name, 'w')
+    out_file = open(DATAPATH+file_name, 'w', encoding='utf8')
 
     for line, bytes_processed in zst.read_lines(file_path):
 
@@ -55,6 +56,8 @@ if __name__ == "__main__":
                     aita_deleted += 1
                 elif obj["link_flair_text"] == None:
                     aita_no_flair += 1
+                elif obj["selftext"] == "[deleted]" or obj["selftext"] == "[removed]":
+                    aita_context_missing += 1
                 else:
                     batch_str += line + '\n'
 
@@ -68,6 +71,14 @@ if __name__ == "__main__":
             out_file.write(batch_str)
             batch_str = ""
 
-    print(f"Complete : {good_lines:,} : {bad_lines:,}\nFound {aita_posts_found} AItA posts.\n{aita_no_flair} had no flair.\n{aita_deleted} were deleted by user.")
     out_file.write(batch_str)
     out_file.close()
+
+    total_removed = aita_no_flair + aita_deleted + aita_context_missing
+
+    # Append statistics to file for later.
+    stats = f"{good_lines:,} total posts.\nFound {aita_posts_found:,} AItA posts.\n{aita_no_flair:,} had no flair.\n{aita_deleted:,} were deleted by user.\n{aita_context_missing:,} had selftext removed or deleted.\nIn total {total_removed:,} AItA posts were ignored."
+    with open(DATAPATH+"extraction-stats.txt", 'a') as stats_file:
+        stats_file.write(f"{file_path}\n{stats}\n\n")
+
+    print(f"Complete : {good_lines:,} : {bad_lines:,}\n{stats}")
