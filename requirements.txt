@@ -3,6 +3,8 @@ tqdm
 gdown
 datasets
 zstandard
+matplotlib
+scikit-learn
 transformers
 torchmetrics
 python-dotenv
