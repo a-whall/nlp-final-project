@@ -7,6 +7,7 @@ TODO:
     - pass batched inputs to model.
     - use datasets lib to access the dataset instead of an expected local copy.
 """
+import os
 import torch
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
@@ -14,17 +15,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 import csv
 from transformers import DistilBertTokenizer, DistilBertModel
+from progress import ShowProgress
 
 
 
-N_SAMPLES_PER_CLASS = 50
+N_SAMPLES_PER_CLASS = 500
 SEED = 0
 DATAPATH = 'data/AItAS_dataset.csv'
 CLASSES = ["Not the A-hole", "Asshole", "No A-holes here", "Everyone Sucks", "Not enough info"]
 
 
 
-os.makedirs("./data/")
+os.makedirs("./data/", exist_ok=True)
 
 # Separate the data by class.
 class_separated_data = { c: [] for c in CLASSES }
@@ -47,7 +49,7 @@ embeddings = []
 tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
 distilbert = DistilBertModel.from_pretrained('distilbert-base-uncased')
 for category in CLASSES:
-    for i in range(N_SAMPLES_PER_CLASS):
+    for i in ShowProgress(range(N_SAMPLES_PER_CLASS), desc=category):
         text = subsampled_data[category][i]
         inputs = tokenizer(
             text,
