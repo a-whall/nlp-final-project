@@ -71,10 +71,11 @@ def main(args):
 
     split = ds.train_test_split(test_size=0.2, stratify_by_column="num_label", seed=args.seed)
 
+    cpu_count = os.cpu_count()
     loader_args = {
         'batch_size': args.device_batch_size,
         'shuffle': True,
-        'num_workers': 16,
+        'num_workers': cpu_count if cpu_count is not None else 1,
         'pin_memory': True
     }
 
