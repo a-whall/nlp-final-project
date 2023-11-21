@@ -50,16 +50,24 @@ def main(args):
             param.requires_grad = False
 
     label_mapping = { "Not the A-hole": 0, "Asshole": 1, "No A-holes here": 2, "Everyone Sucks": 3, "Not enough info": 4 }
-    full_dataset = load_dataset('awhall/aita_21-11_22-10')["train"]
+    full_dataset = load_dataset('awhall/aita_21-10_23-09')["train"]
     ds = full_dataset.map(lambda x: { **x, 'num_label': label_mapping[x['label']] }).class_encode_column('num_label')
     
-    # Discard samples of the most frequent NTA class
+    # Class balance the dataset.
     np.random.seed(args.seed)
-    indices_of_NTA = [i for i, example in enumerate(ds) if example['num_label'] == 0]
-    indices_to_discard = np.random.choice(indices_of_NTA, 69000, replace=False)
-    all_indices = np.arange(len(ds))
-    indices_to_keep = np.setdiff1d(all_indices, indices_to_discard)
-    ds = ds.select(indices_to_keep)
+    N_to_keep = 4500
+    for label, value in label_mapping.items():
+        indices_of_label = [i for i, example in enumerate(ds) if example['num_label'] == value]
+        indices_to_keep = np.random.choice(indices_of_label, N_to_keep, replace=False)
+        indices_of_other_labels = [i for i, example in enumerate(ds) if example['num_label'] != value]
+        indices_to_keep = np.concatenate((indices_of_other_labels, indices_to_keep))
+        ds = ds.select(indices_to_keep)
+
+    # Show class distribution.
+    label_counts = {"Not the A-hole": 0, "Asshole": 0, "No A-holes here": 0, "Everyone Sucks": 0, "Not enough info": 0}
+    for sample in ds:
+        label_counts[sample["label"]] += 1
+    print(label_counts)
 
     split = ds.train_test_split(test_size=0.2, stratify_by_column="num_label", seed=args.seed)
 
@@ -91,9 +99,10 @@ def main(args):
             with torch.no_grad():
                 for batch in ShowProgress(validation_batch_loader, desc=f"Untrained Model Evaluation"):
                     batch = [feature.to(args.device) for feature in batch]
+                    targets = torch.argmax(batch[-1], dim=1)
                     logits = model(*batch[:-1])
-                    loss = criterion(logits, batch[-1])
-                    validation_accuracy(torch.argmax(logits,dim=1), torch.argmax(batch[-1],dim=1))
+                    loss = criterion(logits, targets)
+                    validation_accuracy(torch.argmax(logits,dim=1), targets)
                     validation_loss += loss.item()
                 validation_loss /= len(validation_dataset)
             history["Validation Loss"].append(validation_loss)
@@ -109,9 +118,10 @@ def main(args):
         for i, batch in enumerate(ShowProgress(train_batch_loader, desc=f"Training Epoch-{epoch+1}")):
             batch = [feature.to(args.device) for feature in batch]            
             logits = model(*batch[:-1])
-            loss = criterion(logits, batch[-1])
+            targets = torch.argmax(batch[-1], dim=1)
+            loss = criterion(logits, targets)
             loss.backward()
-            train_accuracy(torch.argmax(logits,dim=1), torch.argmax(batch[-1],dim=1))
+            train_accuracy(torch.argmax(logits,dim=1), targets)
             accumulated_loss += loss.item()
             total_loss += loss.item()
             samples_processed += batch[-1].size(0)
@@ -140,9 +150,10 @@ def main(args):
         with torch.no_grad():
             for batch in ShowProgress(validation_batch_loader, desc=f"Validating Epoch-{epoch+1}"):
                 batch = [feature.to(args.device) for feature in batch]
+                targets = torch.argmax(batch[-1], dim=1)
                 logits = model(*batch[:-1])
-                loss = criterion(logits, batch[-1])
-                validation_accuracy(torch.argmax(logits,dim=1), torch.argmax(batch[-1],dim=1))
+                loss = criterion(logits, targets)
+                validation_accuracy(torch.argmax(logits,dim=1), targets)
                 validation_loss += loss.item()
             validation_loss /= len(validation_dataset)
         # Average loss per sample over the entire validation loop
@@ -189,7 +200,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--model',
         type=str,
-        default="DistilBert_B",
+        default="DistilBert_A",
         choices=[name for name, obj in getmembers(models) if isclass(obj) and issubclass(obj, torch.nn.Module)],
         help="The name of the model class to train. The name must match one of the models defined in scripts/models.py",
         metavar=""
@@ -222,7 +233,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--learning_rate',
         type=float,
-        default=5e-5,
+        default=1e-5,
         help="AKA step-length. This hyperparameter controls how much the optimizer adjusts the model weights in each step during gradient descent.",
         metavar=""
     )
@@ -262,7 +273,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--freeze',
         type=bool,
-        default=True,
+        default=False,
         help="Freeze the weights of the models bert layers. Keeps embeddings consistent.",
         metavar=""
     )
