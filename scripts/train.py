@@ -1,15 +1,33 @@
 import os
 import argparse
 import torch
-from torch import nn, optim, cuda
+from torch import (
+    argmax,
+    cuda,
+    load,
+    nn,
+    no_grad,
+    optim,
+    save,
+    Tensor,
+    tensor
+)
 from torch.utils.data import DataLoader
-import models
 from datasets import load_dataset
 from torchmetrics.classification import MulticlassAccuracy
 from progress import ShowProgress
-import matplotlib.pyplot as plt
-from inspect import getmembers, isclass
+from inspect import (
+    getmembers,
+    isclass
+)
 import numpy as np
+import models
+from util import (
+    plot,
+    subsample,
+    stratified_kfold,
+    stratified_split
+)
 
 
 
@@ -17,12 +35,10 @@ def main(args):
 
     ModelClass = getattr(models, args.model)
 
-    model = ModelClass()
+    model = ModelClass(args.dropout)
     model.to(args.device)
 
-    criterion = nn.CrossEntropyLoss(reduction='sum')
-
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
     start_epoch = 0
     history = {
@@ -34,49 +50,34 @@ def main(args):
     }
     if os.path.exists(args.model_path):
         print(f"Using model checkpoint {args.model_path}")
-        checkpoint = torch.load(args.model_path)
+        checkpoint = load(args.model_path)
         args.seed = checkpoint["seed"]
         history = checkpoint["history"]
-        start_epoch = checkpoint["epoch"] + 1
+        args.start_epoch = checkpoint["epoch"] + 1
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         for state in optimizer.state.values():
             for k, v in state.items():
-                if isinstance(v, torch.Tensor):
+                if isinstance(v, Tensor):
                     state[k] = v.to(args.device)
 
     if args.freeze:
         for param in model.bert.parameters():
             param.requires_grad = False
 
-    label_mapping = { "Not the A-hole": 0, "Asshole": 1, "No A-holes here": 2, "Everyone Sucks": 3, "Not enough info": 4 }
     full_dataset = load_dataset('awhall/aita_21-10_23-09')["train"]
-    ds = full_dataset.map(lambda x: { **x, 'num_label': label_mapping[x['label']] }).class_encode_column('num_label')
-    
-    # Class balance the dataset.
-    np.random.seed(args.seed)
-    N_to_keep = 4500
-    for label, value in label_mapping.items():
-        indices_of_label = [i for i, example in enumerate(ds) if example['num_label'] == value]
-        indices_to_keep = np.random.choice(indices_of_label, N_to_keep, replace=False)
-        indices_of_other_labels = [i for i, example in enumerate(ds) if example['num_label'] != value]
-        indices_to_keep = np.concatenate((indices_of_other_labels, indices_to_keep))
-        ds = ds.select(indices_to_keep)
+    keep = { "Not the A-hole": 15000, "Asshole": 15000, "No A-holes here": 9852, "Everyone Sucks": 7910, "Not enough info": 4552 }
+    subsampled_dataset, weights = subsample(full_dataset, keep, args.seed)
+    split = stratified_split(subsampled_dataset, "80/10/10", column="label", seed=args.seed)
 
-    # Show class distribution.
-    label_counts = {"Not the A-hole": 0, "Asshole": 0, "No A-holes here": 0, "Everyone Sucks": 0, "Not enough info": 0}
-    for sample in ds:
-        label_counts[sample["label"]] += 1
-    print(label_counts)
-
-    split = ds.train_test_split(test_size=0.2, stratify_by_column="num_label", seed=args.seed)
+    criterion = nn.CrossEntropyLoss(reduction='sum', weight=tensor(weights, dtype=torch.float, device=args.device))
 
     cpu_count = os.cpu_count()
     loader_args = {
         'batch_size': args.device_batch_size,
-        'shuffle': True,
         'num_workers': cpu_count if cpu_count is not None else 1,
-        'pin_memory': True
+        'pin_memory': True,
+        'shuffle': True
     }
 
     train_dataset = model.dataLoaderType(split['train'])
@@ -85,100 +86,37 @@ def main(args):
     validation_dataset = model.dataLoaderType(split['test'])
     validation_batch_loader = DataLoader(validation_dataset, **loader_args)
 
-    train_accuracy = MulticlassAccuracy(num_classes=5, average="macro").to(args.device)
-    validation_accuracy = MulticlassAccuracy(num_classes=5, average="macro").to(args.device)
+    for epoch in range(args.start_epoch, args.start_epoch + args.epochs):
 
-    for epoch in range(start_epoch, start_epoch + args.epochs):
-
-        # Evaluate the untrained model.
         if epoch == 0:
-            model.eval()
+            loss, acc = eval(model, criterion, validation_batch_loader, args)    
+            history["Validation Loss"].append(loss/len(validation_dataset))
+            history["Validation Accuracy"].append(acc)
             history["Train Loss (epoch)"].append(None)
             history["Train Accuracy"].append(None)
-            validation_accuracy.reset()
-            validation_loss = 0.0
-            with torch.no_grad():
-                for batch in ShowProgress(validation_batch_loader, desc=f"Untrained Model Evaluation"):
-                    batch = [feature.to(args.device) for feature in batch]
-                    targets = torch.argmax(batch[-1], dim=1)
-                    logits = model(*batch[:-1])
-                    loss = criterion(logits, targets)
-                    validation_accuracy(torch.argmax(logits,dim=1), targets)
-                    validation_loss += loss.item()
-                validation_loss /= len(validation_dataset)
-            history["Validation Loss"].append(validation_loss)
-            history["Validation Accuracy"].append(validation_accuracy.compute().cpu())
 
-        # Training Loop.
-        model.train()
-        train_accuracy.reset()
-        accumulation_steps = args.batch_size // args.device_batch_size
-        accumulated_loss = 0.0
-        samples_processed = 0
-        total_loss = 0.0
-        for i, batch in enumerate(ShowProgress(train_batch_loader, desc=f"Training Epoch-{epoch+1}")):
-            batch = [feature.to(args.device) for feature in batch]            
-            logits = model(*batch[:-1])
-            targets = torch.argmax(batch[-1], dim=1)
-            loss = criterion(logits, targets)
-            loss.backward()
-            train_accuracy(torch.argmax(logits,dim=1), targets)
-            accumulated_loss += loss.item()
-            total_loss += loss.item()
-            samples_processed += batch[-1].size(0)
-            if (i+1) % accumulation_steps == 0 or (i+1) == len(train_batch_loader):
-                optimizer.step()
-                optimizer.zero_grad()
-                # The average loss per sample over the most recent batch.
-                history["Train Loss (batch)"].append(accumulated_loss/samples_processed)
-                accumulated_loss = 0.0
-                samples_processed = 0
-        # The average loss per sample over the entire training loop
-        history["Train Loss (epoch)"].append(total_loss/len(train_dataset))
+        loss, batch_hist, acc = train(model, criterion, optimizer, train_batch_loader, args)
+        history["Train Loss (epoch)"].append(loss/len(train_dataset))
+        history["Train Loss (batch)"].extend(batch_hist)
+        history["Train Accuracy"].append(acc)
 
-        plt.plot(history["Train Loss (batch)"], label=f"Batch Size: {args.batch_size}, Total Epochs: {epoch+1}")
-        plt.xlabel("Steps")
-        plt.ylabel("Cross Entropy Loss")
-        plt.title("Loss")
-        plt.legend()
-        plt.savefig(f"{args.data_path}{args.plot_dir}BatchLoss-{args.model_name}.png")
-        plt.clf()
+        loss, acc = eval(model, criterion, validation_batch_loader, args)
+        history["Validation Loss"].append(loss/len(validation_dataset))
+        history["Validation Accuracy"].append(acc)
 
-        # Evaluate the trained model.
-        model.eval()
-        validation_accuracy.reset()
-        validation_loss = 0.0
-        with torch.no_grad():
-            for batch in ShowProgress(validation_batch_loader, desc=f"Validating Epoch-{epoch+1}"):
-                batch = [feature.to(args.device) for feature in batch]
-                targets = torch.argmax(batch[-1], dim=1)
-                logits = model(*batch[:-1])
-                loss = criterion(logits, targets)
-                validation_accuracy(torch.argmax(logits,dim=1), targets)
-                validation_loss += loss.item()
-            validation_loss /= len(validation_dataset)
-        # Average loss per sample over the entire validation loop
-        history["Validation Loss"].append(validation_loss)
-        history["Train Accuracy"].append(train_accuracy.compute().cpu())
-        history["Validation Accuracy"].append(validation_accuracy.compute().cpu())
+        plot("Batch Loss", "Steps", "Cross Entropy Loss", args,
+            (history["Train Loss (batch)"], f"Batch Size: {args.batch_size}")
+        )
 
-        plt.plot(history["Train Loss (epoch)"], label=f"Train Loss (Average per sample over entire epoch)")
-        plt.plot(history["Validation Loss"], label=f"Validation Loss")
-        plt.xlabel("Epoch")
-        plt.ylabel("Cross Entropy Loss")
-        plt.title("Loss")
-        plt.legend()
-        plt.savefig(f"{args.data_path}{args.plot_dir}Loss-{args.model_name}.png")
-        plt.clf()
+        plot("Epoch Loss", "Epoch", "Cross Entropy Loss", args,
+            (history["Train Loss (epoch)"], "Train"),
+            (history["Validation Loss"], "Validation")
+        )
 
-        plt.plot(history["Train Accuracy"], label=f"Train")
-        plt.plot(history["Validation Accuracy"], label=f"Validation")
-        plt.xlabel("Epoch")
-        plt.ylabel("Accuracy")
-        plt.title("Accuracy")
-        plt.legend()
-        plt.savefig(f"{args.data_path}{args.plot_dir}Accuracy-{args.model_name}.png")
-        plt.clf()
+        plot("Epoch Accuracy", "Epoch", "Macro Accuracy", args,
+            (history["Train Accuracy"], "Train"),
+            (history["Validation Accuracy"], "Validation")
+        )
 
         checkpoint = {
             'epoch': epoch,
@@ -188,7 +126,53 @@ def main(args):
             'optimizer_state_dict': optimizer.state_dict()
         }
 
-        torch.save(checkpoint, args.model_path)
+        save(checkpoint, args.model_path)
+
+
+
+def train(model, criterion, optimizer, batch_loader, args):
+    model.train()
+    accuracy = MulticlassAccuracy(num_classes=5, average="macro").to(args.device)
+    accumulated_loss = 0.0
+    samples_processed = 0
+    total_loss = 0.0
+    batch_loss_history = []
+    for i, batch in enumerate(ShowProgress(batch_loader, desc=f"Training")):
+        batch = [feature.to(args.device) for feature in batch]            
+        logits = model(*batch[:-1])
+        targets = argmax(batch[-1], dim=1)
+        loss = criterion(logits, targets)
+        loss.backward()
+        accuracy(argmax(logits, dim=1), targets)
+        accumulated_loss += loss.item()
+        samples_processed += batch[-1].size(0)
+        if (i+1) % args.gradient_accumulation_steps == 0 or (i+1) == len(batch_loader):
+            optimizer.step()
+            optimizer.zero_grad()
+            batch_loss_history.append(accumulated_loss/samples_processed)
+            total_loss += accumulated_loss
+            accumulated_loss = 0.0
+            samples_processed = 0
+    return (total_loss, batch_loss_history, accuracy.compute().cpu().item())
+
+
+
+def eval(model: nn.Module, criterion: nn.CrossEntropyLoss, batch_loader: DataLoader, args: dict):
+    """
+    Purpose:
+        Set the model to eval mode and evaluate its performance over an entire dataset.
+    """
+    model.eval()
+    accuracy = MulticlassAccuracy(num_classes=5, average="macro").to(args.device)
+    loss = 0.0
+    with no_grad():
+        for batch in ShowProgress(batch_loader, desc=f"Evaluating"):
+            batch = [feature.to(args.device) for feature in batch]
+            targets = argmax(batch[-1], dim=1)
+            logits = model(*batch[:-1])
+            accuracy(argmax(logits, dim=1), targets)
+            loss += criterion(logits, targets).item()
+    return (loss, accuracy.compute().cpu().item())
 
 
 
@@ -202,7 +186,7 @@ if __name__ == "__main__":
         '--model',
         type=str,
         default="DistilBert_A",
-        choices=[name for name, obj in getmembers(models) if isclass(obj) and issubclass(obj, torch.nn.Module)],
+        choices=[name for name, obj in getmembers(models) if isclass(obj) and issubclass(obj, nn.Module)],
         help="The name of the model class to train. The name must match one of the models defined in scripts/models.py",
         metavar=""
     )
@@ -240,10 +224,26 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--batch_size',
+        '--weight_decay',
+        type=float,
+        default=1e-5,
+        help="L2 regularization factor.",
+        metavar=""
+    )
+
+    parser.add_argument(
+        '--dropout',
+        type=float,
+        default=0.3,
+        help="Model dropout rate. Percent chance of an element in the dropout layer to be zeroed.",
+        metavar=""
+    )
+
+    parser.add_argument(
+        '--gradient_accumulation_steps',
         type=int,
-        default=1024,
-        help="How many inputs to include in each batch of optimization. This many inputs will be processed and contribute to gradient of model parameters before allowing the optimizer to update model weights. Larger batch size often result in smoother gradients which can lead to more stable and reliable training convergence, smaller batch size tend to produce noisy gradients which may help the model to generalize better. When adjusting batch size, consider adjusting the learning rate as well.",
+        default=16,
+        help="How many batches will be processed before allowing the optimizer to update model weights. Larger batch size often result in smoother gradients which can lead to more stable and reliable training convergence, smaller batch size tend to produce noisy gradients which may help the model to generalize better. When adjusting batch size, consider adjusting the learning rate as well.",
         metavar=""
     )
 
@@ -286,8 +286,12 @@ if __name__ == "__main__":
 
     args.device = 'cuda' if cuda.is_available() else 'cpu'
 
-    args.model_name = f"model-{args.model}-{args.seed}-{args.batch_size}-{args.freeze}"
+    args.batch_size = args.device_batch_size * args.gradient_accumulation_steps
+
+    args.model_name = f"{args.model}-{args.seed}-{args.batch_size}-{args.freeze}-{args.dropout*100:.0f}-{args.weight_decay:.0e}"
 
     args.model_path = f"{args.data_path}{args.checkpoint_dir}{args.model_name}.pth"
+
+    args.start_epoch = 0
 
     main(args)
